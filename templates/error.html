@@ -1,0 +1,10 @@
+{% extends "base.html" %}
+{% block title %}ComicCraft Error{% endblock %}
+{% block content %}
+<section class="card center">
+  <h1>Something went wrong</h1>
+  <p class="error">{{ message }}</p>
+  <p>Check your .env keys and terminal output, then try again.</p>
+  <a class="button" href="/">Back to ComicCraft</a>
+</section>
+{% endblock %}

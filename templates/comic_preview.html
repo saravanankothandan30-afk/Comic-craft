@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block title %}Your Comic — ComicCraft{% endblock %}
+{% block content %}
+<div class="page-heading">
+  <div>
+    <p class="eyebrow">YOUR STORY</p>
+    <h1>Comic Preview</h1>
+  </div>
+  <div class="actions">
+    <a class="button" href="{{ pdf_path }}" download>Download PDF</a>
+    <a class="button secondary" href="/">Create Another</a>
+  </div>
+</div>
+
+<section class="comic-grid">
+{% for panel in layout %}
+  <article class="panel card">
+    <div class="panel-number">PANEL {{ panel.panel_number }}</div>
+    <h2>{{ panel.title }}</h2>
+    <img src="{{ panel.image_path }}" alt="Illustration for {{ panel.title }}">
+    <p class="scene">{{ panel.scene_description }}</p>
+    {% if panel.caption %}<p class="caption">{{ panel.caption }}</p>{% endif %}
+    <h3>Narration</h3>
+    <p>{{ panel.narration }}</p>
+    {% if panel.dialogue %}
+      <h3>Dialogue</h3><p class="dialogue">{{ panel.dialogue }}</p>
+    {% endif %}
+  </article>
+{% endfor %}
+</section>
+{% endblock %}

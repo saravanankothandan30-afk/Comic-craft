@@ -1,0 +1,15 @@
+.venv/
+__pycache__/
+*.pyc
+
+.env
+
+outputs/
+static/panels/
+
+.pytest_cache/
+
+.idea/
+.vscode/
+
+*.log

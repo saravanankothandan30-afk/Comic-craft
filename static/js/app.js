@@ -1,0 +1,1 @@
+console.log("ComicCraft frontend loaded.");
