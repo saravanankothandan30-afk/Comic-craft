@@ -1,3 +1,6 @@
+from __future__ import annotations
+
+import os
 import re
 from pathlib import Path
 
@@ -7,31 +10,41 @@ from huggingface_hub import InferenceClient
 from app.config import get_settings
 
 
+# ============================================================
+# SETTINGS
+# ============================================================
+
 settings = get_settings()
 
 PANELS_DIR = settings.static_dir / "panels"
 PANELS_DIR.mkdir(parents=True, exist_ok=True)
 
+IMAGE_PROVIDER = (
+    getattr(settings, "image_provider", "hf")
+    or os.getenv("IMAGE_PROVIDER", "hf")
+).lower().strip()
 
-# ---------------------------------------------------------
-# SAFE FILE NAME
-# ---------------------------------------------------------
+HF_TOKEN = (
+    getattr(settings, "hf_token", "")
+    or os.getenv("HF_TOKEN", "")
+).strip()
 
-def _safe_name(value: str) -> str:
-    name = re.sub(
-        r"[^a-zA-Z0-9_-]+",
-        "_",
-        value,
+HF_IMAGE_MODEL = (
+    getattr(
+        settings,
+        "hf_image_model",
+        "black-forest-labs/FLUX.1-schnell",
     )
+    or os.getenv(
+        "HF_IMAGE_MODEL",
+        "black-forest-labs/FLUX.1-schnell",
+    )
+).strip()
 
-    name = name[:60].strip("_")
 
-    return name or "panel"
-
-
-# ---------------------------------------------------------
+# ============================================================
 # FONT
-# ---------------------------------------------------------
+# ============================================================
 
 def _get_font(size: int, bold: bool = False):
 
@@ -39,40 +52,325 @@ def _get_font(size: int, bold: bool = False):
         font_paths = [
             "C:/Windows/Fonts/arialbd.ttf",
             "C:/Windows/Fonts/segoeuib.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+            "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
         ]
     else:
         font_paths = [
             "C:/Windows/Fonts/arial.ttf",
             "C:/Windows/Fonts/segoeui.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
         ]
 
     for font_path in font_paths:
-
         if Path(font_path).exists():
-
-            return ImageFont.truetype(
-                font_path,
-                size,
-            )
+            try:
+                return ImageFont.truetype(font_path, size)
+            except Exception:
+                pass
 
     return ImageFont.load_default()
 
 
-# ---------------------------------------------------------
-# LOCAL COLORFUL FALLBACK
-# ---------------------------------------------------------
+# ============================================================
+# CLEAN PROMPT
+# ============================================================
+
+def _clean_prompt(prompt: str) -> str:
+
+    if prompt is None:
+        raise ValueError("Image prompt cannot be None.")
+
+    if not isinstance(prompt, str):
+        raise TypeError("Image prompt must be a string.")
+
+    prompt = prompt.strip()
+
+    if not prompt:
+        raise ValueError("Image prompt cannot be empty.")
+
+    # Prevent unnecessarily huge prompts.
+    if len(prompt) > 5000:
+        prompt = prompt[:5000]
+
+    # Remove accidental excessive whitespace.
+    prompt = re.sub(r"\s+", " ", prompt).strip()
+
+    return prompt
+
+
+# ============================================================
+# BUILD THE IMPORTANT AI PROMPT
+# ============================================================
+
+def _build_ai_prompt(
+    prompt: str,
+    panel_number: int,
+) -> str:
+
+    prompt = _clean_prompt(prompt)
+
+    return f"""
+COMIC PANEL {panel_number}
+
+MOST IMPORTANT INSTRUCTION:
+Create the image primarily from the EXACT SCENE DESCRIPTION below.
+Do not replace the described scene with a generic comic scene.
+
+============================================================
+EXACT SCENE DESCRIPTION
+============================================================
+
+{prompt}
+
+============================================================
+SCENE INTERPRETATION
+============================================================
+
+The scene description above is the source of truth.
+
+You must visually identify and represent:
+
+1. WHO is present
+2. WHAT each character is doing
+3. WHERE the scene takes place
+4. IMPORTANT objects mentioned
+5. The character's expression and body language
+6. The important action or event
+7. The atmosphere and mood
+8. The relationship between characters and objects
+
+If the scene describes a specific location, show that location clearly.
+
+If the scene describes a specific action, show that action clearly.
+
+If the scene describes an important object, make that object visible and relevant.
+
+Do not substitute unrelated characters, locations, objects, or actions.
+
+============================================================
+CONTINUITY
+============================================================
+
+This is panel {panel_number} of a five-panel comic.
+
+Maintain visual continuity with the story.
+
+The main character should remain visually consistent:
+- same approximate age
+- same hairstyle
+- same clothing
+- same general appearance
+
+Only change the character's pose, expression, or action when required by
+the scene description.
+
+============================================================
+ART STYLE
+============================================================
+
+Create a polished colorful comic-book illustration.
+
+Style:
+- professional digital comic artwork
+- vibrant colors
+- clean black line art
+- expressive characters
+- cinematic lighting
+- detailed environment
+- strong depth
+- natural perspective
+- dynamic composition
+- polished professional illustration
+
+============================================================
+COMPOSITION
+============================================================
+
+Landscape comic-panel composition.
+
+Show:
+- foreground
+- main characters
+- important objects
+- detailed environment
+- background depth
+
+The main action must be easy to understand immediately.
+
+Do not make the character tiny.
+
+Do not use a generic studio background.
+
+Do not use an empty background.
+
+============================================================
+TEXT RESTRICTIONS
+============================================================
+
+Do NOT generate:
+- speech bubbles
+- captions
+- subtitles
+- dialogue text
+- letters
+- words
+- logos
+- watermarks
+- UI elements
+
+The story text will be added separately by ComicCraft.
+
+============================================================
+FINAL PRIORITY
+============================================================
+
+SCENE ACCURACY is more important than decorative elements.
+
+The final image must look like a real comic panel showing
+the exact event described in the scene description.
+""".strip()
+
+
+# ============================================================
+# AI IMAGE GENERATION
+# ============================================================
+
+def _generate_ai_image(
+    prompt: str,
+    panel_number: int,
+) -> str:
+
+    prompt = _clean_prompt(prompt)
+
+    if not HF_TOKEN:
+        raise RuntimeError(
+            "HF_TOKEN is missing. Add HF_TOKEN to your environment variables."
+        )
+
+    final_prompt = _build_ai_prompt(
+        prompt,
+        panel_number,
+    )
+
+    print()
+    print("=" * 80)
+    print(f"GENERATING AI IMAGE - PANEL {panel_number}")
+    print("=" * 80)
+
+    print()
+    print("MODEL:")
+    print(HF_IMAGE_MODEL)
+
+    print()
+    print("ORIGINAL GEMINI IMAGE PROMPT:")
+    print(prompt)
+
+    print()
+    print("FINAL FLUX PROMPT:")
+    print(final_prompt)
+
+    print("=" * 80)
+    print()
+
+    # --------------------------------------------------------
+    # Hugging Face client
+    # --------------------------------------------------------
+
+    try:
+        client = InferenceClient(
+            provider="auto",
+            api_key=HF_TOKEN,
+        )
+
+    except Exception as exc:
+        raise RuntimeError(
+            f"Could not create Hugging Face client: {exc}"
+        ) from exc
+
+    # --------------------------------------------------------
+    # Generate image
+    # --------------------------------------------------------
+
+    try:
+        image = client.text_to_image(
+            prompt=final_prompt,
+            model=HF_IMAGE_MODEL,
+        )
+
+    except Exception as exc:
+
+        print()
+        print("❌ HUGGING FACE IMAGE ERROR")
+        print(str(exc))
+        print()
+
+        raise RuntimeError(
+            f"Hugging Face image generation failed: {exc}"
+        ) from exc
+
+    # --------------------------------------------------------
+    # Validate
+    # --------------------------------------------------------
+
+    if image is None:
+        raise RuntimeError(
+            "Hugging Face returned no image."
+        )
+
+    try:
+
+        if image.mode != "RGB":
+            image = image.convert("RGB")
+
+    except Exception as exc:
+        raise RuntimeError(
+            f"Could not process generated image: {exc}"
+        ) from exc
+
+    # --------------------------------------------------------
+    # Fixed filename
+    # --------------------------------------------------------
+
+    filename = f"panel_{panel_number}.png"
+
+    image_path = PANELS_DIR / filename
+
+    # --------------------------------------------------------
+    # Save
+    # --------------------------------------------------------
+
+    try:
+
+        image.save(
+            image_path,
+            "PNG",
+        )
+
+    except Exception as exc:
+        raise RuntimeError(
+            f"Could not save generated image: {exc}"
+        ) from exc
+
+    print()
+    print("✅ AI IMAGE GENERATED")
+    print(f"Panel: {panel_number}")
+    print(f"Saved: {image_path}")
+    print(f"URL: /static/panels/{filename}")
+    print()
+
+    return f"/static/panels/{filename}"
+
+
+# ============================================================
+# LOCAL FALLBACK
+# ============================================================
 
 def _placeholder(
     prompt: str,
     panel_number: int,
 ) -> str:
-
-    filename = (
-        f"panel_{panel_number}_"
-        f"{_safe_name(prompt)}.png"
-    )
-
-    path = PANELS_DIR / filename
 
     width = 1200
     height = 800
@@ -97,133 +395,53 @@ def _placeholder(
 
     draw = ImageDraw.Draw(image)
 
-    title_font = _get_font(
-        38,
-        bold=True,
-    )
-
-    body_font = _get_font(
-        24,
-        bold=False,
-    )
-
-    # -----------------------------------------------------
-    # OUTER BORDER
-    # -----------------------------------------------------
+    # --------------------------------------------------------
+    # Border
+    # --------------------------------------------------------
 
     draw.rounded_rectangle(
-        (
-            15,
-            15,
-            width - 15,
-            height - 15,
-        ),
+        (15, 15, width - 15, height - 15),
         radius=25,
         fill=background,
         outline=(20, 20, 30),
         width=10,
     )
 
-    # -----------------------------------------------------
-    # SKY
-    # -----------------------------------------------------
+    # --------------------------------------------------------
+    # Sky
+    # --------------------------------------------------------
 
     draw.rectangle(
-        (
-            30,
-            30,
-            width - 30,
-            450,
-        ),
-        fill=(
-            135,
-            206,
-            235,
-        ),
+        (30, 30, width - 30, 450),
+        fill=(135, 206, 235),
     )
 
-    # -----------------------------------------------------
-    # SUN
-    # -----------------------------------------------------
+    # --------------------------------------------------------
+    # Sun
+    # --------------------------------------------------------
 
     draw.ellipse(
-        (
-            80,
-            80,
-            200,
-            200,
-        ),
+        (80, 80, 200, 200),
         fill=(255, 220, 60),
         outline=(240, 160, 30),
         width=5,
     )
 
-    # -----------------------------------------------------
-    # CLOUDS
-    # -----------------------------------------------------
-
-    clouds = [
-        (300, 100),
-        (850, 130),
-    ]
-
-    for x, y in clouds:
-
-        draw.ellipse(
-            (
-                x,
-                y,
-                x + 100,
-                y + 55,
-            ),
-            fill="white",
-        )
-
-        draw.ellipse(
-            (
-                x + 45,
-                y - 25,
-                x + 145,
-                y + 55,
-            ),
-            fill="white",
-        )
-
-        draw.ellipse(
-            (
-                x + 90,
-                y,
-                x + 180,
-                y + 55,
-            ),
-            fill="white",
-        )
-
-    # -----------------------------------------------------
-    # GROUND
-    # -----------------------------------------------------
+    # --------------------------------------------------------
+    # Ground
+    # --------------------------------------------------------
 
     draw.rectangle(
-        (
-            30,
-            450,
-            width - 30,
-            770,
-        ),
+        (30, 450, width - 30, 770),
         fill=(100, 180, 100),
     )
 
-    # -----------------------------------------------------
-    # SIMPLE BUILDING
-    # -----------------------------------------------------
+    # --------------------------------------------------------
+    # Building
+    # --------------------------------------------------------
 
     draw.rectangle(
-        (
-            750,
-            280,
-            1060,
-            470,
-        ),
+        (750, 280, 1060, 470),
         fill=(245, 180, 100),
         outline=(30, 30, 30),
         width=6,
@@ -244,20 +462,15 @@ def _placeholder(
     for x in [790, 900, 1010]:
 
         draw.rectangle(
-            (
-                x,
-                330,
-                x + 55,
-                390,
-            ),
+            (x, 330, x + 55, 390),
             fill=(100, 190, 240),
             outline=(30, 30, 30),
             width=4,
         )
 
-    # -----------------------------------------------------
-    # CHARACTER
-    # -----------------------------------------------------
+    # --------------------------------------------------------
+    # Character
+    # --------------------------------------------------------
 
     cx = 470
     cy = 390
@@ -379,61 +592,38 @@ def _placeholder(
         width=15,
     )
 
-    # -----------------------------------------------------
-    # SPEECH BUBBLE
-    # -----------------------------------------------------
+    # --------------------------------------------------------
+    # Panel label
+    # --------------------------------------------------------
 
-    draw.rounded_rectangle(
-        (
-            80,
-            500,
-            650,
-            650,
-        ),
-        radius=30,
-        fill="white",
-        outline=(20, 20, 30),
-        width=6,
-    )
-
-    draw.polygon(
-        [
-            (280, 650),
-            (330, 700),
-            (370, 650),
-        ],
-        fill="white",
-        outline=(20, 20, 30),
-    )
-
-    speech_font = _get_font(
-        27,
+    title_font = _get_font(
+        38,
         bold=True,
     )
 
-    draw.text(
-        (
-            115,
-            545,
-        ),
-        "Let's begin",
-        fill=(20, 20, 30),
-        font=speech_font,
+    body_font = _get_font(
+        22,
     )
 
     draw.text(
-        (
-            115,
-            590,
-        ),
-        "our adventure!",
+        (55, 50),
+        f"COMICCRAFT — PANEL {panel_number}",
         fill=(20, 20, 30),
-        font=speech_font,
+        font=title_font,
     )
 
-    # -----------------------------------------------------
-    # PROMPT AREA
-    # -----------------------------------------------------
+    # --------------------------------------------------------
+    # Prompt description
+    # --------------------------------------------------------
+
+    prompt_text = re.sub(
+        r"\s+",
+        " ",
+        str(prompt),
+    ).strip()
+
+    if len(prompt_text) > 110:
+        prompt_text = prompt_text[:110] + "..."
 
     draw.rounded_rectangle(
         (
@@ -448,24 +638,16 @@ def _placeholder(
         width=4,
     )
 
-    prompt_text = re.sub(
-        r"\s+",
-        " ",
-        str(prompt),
-    ).strip()
-
-    if len(prompt_text) > 105:
-        prompt_text = prompt_text[:105] + "..."
-
     draw.text(
-        (
-            75,
-            708,
-        ),
+        (75, 708),
         prompt_text,
         fill=(30, 30, 30),
         font=body_font,
     )
+
+    filename = f"panel_{panel_number}.png"
+
+    path = PANELS_DIR / filename
 
     image.save(
         path,
@@ -473,175 +655,67 @@ def _placeholder(
         optimize=True,
     )
 
-    return f"/static/panels/{path.name}"
-
-
-# ---------------------------------------------------------
-# AI IMAGE GENERATION
-# ---------------------------------------------------------
-
-def _generate_ai_image(
-    prompt: str,
-    panel_number: int,
-) -> str:
-
-    if not settings.hf_token:
-
-        raise RuntimeError(
-            "HF_TOKEN is missing."
-        )
-
-    client = InferenceClient(
-        provider="auto",
-        api_key=settings.hf_token,
-    )
-
-    # -----------------------------------------------------
-    # IMPORTANT:
-    # The user's Gemini panel prompt becomes the main
-    # description of the image.
-    # -----------------------------------------------------
-
-    enhanced_prompt = f"""
-Create a high-quality colorful comic-book illustration
-for panel {panel_number} of a continuous comic story.
-
-MAIN SCENE DESCRIPTION:
-{prompt}
-
-The image MUST visually represent the scene described above.
-
-BACKGROUND REQUIREMENTS:
-- Create a detailed environment based on the location
-  described in the prompt.
-- If the prompt describes a school, create a school
-  environment.
-- If it describes a laboratory, create a laboratory.
-- If it describes a forest, create a detailed forest.
-- If it describes a city, create a detailed city.
-- If it describes space, create a detailed space environment.
-- If it describes a village, create a detailed village.
-- If it describes a room, create the appropriate room.
-- Do not use a generic blank background.
-
-CHARACTER REQUIREMENTS:
-- Include the main character described in the prompt.
-- Show the character performing the action described.
-- Use expressive facial expressions and body language.
-- Keep the character visually clear.
-
-ART STYLE:
-- colorful comic-book illustration
-- professional digital illustration
-- vibrant colors
-- clean black line art
-- cinematic lighting
-- detailed background
-- dynamic composition
-- depth and perspective
-- visually rich environment
-- polished artwork
-
-COMPOSITION:
-- landscape orientation
-- wide cinematic scene
-- characters clearly visible
-- background clearly visible
-- foreground, middle ground and background
-- suitable for a comic panel
-
-DO NOT:
-- create a blank background
-- create a white background
-- create a plain studio background
-- add written text
-- add captions
-- add speech bubbles
-- add watermarks
-- add logos
-
-The final result should look like a real colorful
-comic-book panel rather than a presentation slide.
-""".strip()
-
-    image = client.text_to_image(
-        enhanced_prompt,
-        model=settings.hf_image_model,
-    )
-
-    filename = (
-        f"panel_{panel_number}_"
-        f"{_safe_name(prompt)}.png"
-    )
-
-    image_path = PANELS_DIR / filename
-
-    image.save(
-        image_path,
-        "PNG",
-    )
-
     return f"/static/panels/{filename}"
 
 
-# ---------------------------------------------------------
-# MAIN IMAGE FUNCTION
-# ---------------------------------------------------------
+# ============================================================
+# MAIN FUNCTION
+# ============================================================
 
 def generate_image(
     prompt: str,
     panel_number: int,
 ) -> str:
 
+    prompt = _clean_prompt(prompt)
+
     provider = (
-        settings.image_provider
-        .lower()
-        .strip()
+        IMAGE_PROVIDER
+        or "hf"
+    ).lower().strip()
+
+    print()
+    print(
+        f"Starting image generation for panel {panel_number}"
     )
 
-    # -----------------------------------------------------
-    # REAL AI IMAGE
-    # -----------------------------------------------------
+    print(
+        f"IMAGE_PROVIDER = {provider}"
+    )
+
+    # --------------------------------------------------------
+    # HUGGING FACE
+    # --------------------------------------------------------
 
     if provider == "hf":
 
-        try:
+        # IMPORTANT:
+        # Do NOT silently replace a failed AI image.
+        # We want the real error in Render logs.
 
-            return _generate_ai_image(
-                prompt,
-                panel_number,
-            )
+        return _generate_ai_image(
+            prompt,
+            panel_number,
+        )
 
-        except Exception as exc:
-
-            print(
-                f"AI image generation failed for "
-                f"panel {panel_number}: {exc}"
-            )
-
-            print(
-                "Using colorful local fallback image."
-            )
-
-            return _placeholder(
-                prompt,
-                panel_number,
-            )
-
-    # -----------------------------------------------------
-    # LOCAL COLORFUL IMAGE
-    # -----------------------------------------------------
+    # --------------------------------------------------------
+    # PLACEHOLDER
+    # --------------------------------------------------------
 
     if provider == "placeholder":
+
+        print(
+            "Using local placeholder image."
+        )
 
         return _placeholder(
             prompt,
             panel_number,
         )
 
-    # -----------------------------------------------------
-    # INVALID PROVIDER
-    # -----------------------------------------------------
+    # --------------------------------------------------------
+    # INVALID
+    # --------------------------------------------------------
 
     raise RuntimeError(
         "IMAGE_PROVIDER must be "
