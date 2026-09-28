@@ -1,4 +1,7 @@
-import re
+from __future__ import annotations
+
+import os
+import textwrap
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
@@ -9,392 +12,470 @@ from app.config import get_settings
 
 settings = get_settings()
 
-PANELS_DIR = settings.static_dir / "panels"
-PANELS_DIR.mkdir(parents=True, exist_ok=True)
+# -------------------------------------------------------------------
+# Paths
+# -------------------------------------------------------------------
+
+BASE_DIR = Path(__file__).resolve().parents[2]
+
+OUTPUT_DIR = BASE_DIR / "static" / "panels"
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 
-# ----------------------------------------------------------------
-# SAFE FILE NAME
-# ---------------------------------------------------------------- 
+# -------------------------------------------------------------------
+# Configuration
+# -------------------------------------------------------------------
 
-def _safe_name(value: str) -> str:
-    name = re.sub(
-        r"[^a-zA-Z0-9_-]+",
-        "_",
-        value,
-    )
+IMAGE_PROVIDER = os.getenv(
+    "IMAGE_PROVIDER",
+    getattr(settings, "image_provider", "hf"),
+).lower()
 
-    name = name[:60].strip("_")
+HF_TOKEN = os.getenv(
+    "HF_TOKEN",
+    getattr(settings, "hf_token", ""),
+)
 
-    return name or "panel"
+HF_IMAGE_MODEL = os.getenv(
+    "HF_IMAGE_MODEL",
+    getattr(
+        settings,
+        "hf_image_model",
+        "black-forest-labs/FLUX.1-schnell",
+    ),
+)
 
 
-# ---------------------------------------------------------
-# FONT
-# ---------------------------------------------------------
+# -------------------------------------------------------------------
+# Font handling
+# -------------------------------------------------------------------
 
 def _get_font(size: int, bold: bool = False):
+    """
+    Load a font in a cross-platform way.
+
+    Works on:
+    - Windows
+    - Linux / Render
+    - macOS
+
+    Falls back to Pillow's default font if no system font is found.
+    """
 
     if bold:
-        font_paths = [
+        candidates = [
+            # Windows
             "C:/Windows/Fonts/arialbd.ttf",
             "C:/Windows/Fonts/segoeuib.ttf",
+
+            # Linux / Render
             "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+            "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
+
+            # macOS
+            "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+            "/System/Library/Fonts/Supplemental/Helvetica Bold.ttf",
         ]
     else:
-        font_paths = [
+        candidates = [
+            # Windows
             "C:/Windows/Fonts/arial.ttf",
             "C:/Windows/Fonts/segoeui.ttf",
+
+            # Linux / Render
             "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
+
+            # macOS
+            "/System/Library/Fonts/Supplemental/Arial.ttf",
+            "/System/Library/Fonts/Supplemental/Helvetica.ttf",
         ]
 
-    for font_path in font_paths:
-
-        if Path(font_path).exists():
-
-            return ImageFont.truetype(
-                font_path,
-                size,
-            )
+    for font_path in candidates:
+        if os.path.exists(font_path):
+            try:
+                return ImageFont.truetype(font_path, size)
+            except Exception:
+                continue
 
     return ImageFont.load_default()
 
 
-# ---------------------------------------------------------
-# LOCAL PROFESSIONAL FALLBACK
-# ---------------------------------------------------------
+# -------------------------------------------------------------------
+# Prompt validation
+# -------------------------------------------------------------------
 
-def _placeholder(
-    prompt: str,
-    panel_number: int,
-) -> str:
+def _validate_prompt(prompt: str) -> str:
+    """
+    Validate and clean the image-generation prompt.
+    """
 
-    filename = (
-        f"panel_{panel_number}_"
-        f"{_safe_name(prompt)}.png"
-    )
+    if prompt is None:
+        raise ValueError("Image prompt cannot be None.")
 
-    path = PANELS_DIR / filename
+    if not isinstance(prompt, str):
+        raise TypeError("Image prompt must be a string.")
 
-    width = 1200
-    height = 800
+    prompt = prompt.strip()
 
-    # Muted, professional palette (cycled per panel)
-    palettes = [
-        ((30, 41, 59), (51, 65, 85), (99, 179, 237)),
-        ((23, 51, 45), (30, 74, 65), (74, 179, 145)),
-        ((45, 30, 60), (70, 45, 95), (170, 120, 220)),
-        ((51, 35, 20), (92, 62, 30), (230, 170, 90)),
-        ((30, 30, 40), (55, 55, 75), (150, 150, 200)),
-    ]
+    if not prompt:
+        raise ValueError("Image prompt cannot be empty.")
 
-    dark, mid, accent = palettes[
-        (panel_number - 1) % len(palettes)
-    ]
+    # Prevent extremely large prompts from causing unnecessary
+    # requests to the image-generation service.
+    if len(prompt) > 4000:
+        prompt = prompt[:4000]
+
+    return prompt
+
+
+# -------------------------------------------------------------------
+# Prompt enhancement
+# -------------------------------------------------------------------
+
+def _build_image_prompt(prompt: str) -> str:
+    """
+    Enhance the AI image prompt so generated panels have
+    proper comic-style backgrounds and visual details.
+    """
+
+    return f"""
+Create a high-quality colorful comic-book illustration.
+
+Scene description:
+{prompt}
+
+Requirements:
+- detailed environment and background
+- clear main character
+- expressive character pose and facial expression
+- strong visual storytelling
+- colorful professional comic-book artwork
+- cinematic composition
+- clean line art
+- attractive lighting
+- rich background details
+- consistent visual style
+- suitable for a five-panel comic
+- landscape composition
+- 4:3 aspect ratio
+
+Do NOT include:
+- speech bubbles
+- dialogue text
+- captions
+- subtitles
+- written words
+- logos
+- watermarks
+- UI elements
+- borders
+
+The image should look like a finished comic panel illustration.
+""".strip()
+
+
+# -------------------------------------------------------------------
+# Local placeholder
+# -------------------------------------------------------------------
+
+def _placeholder(panel_number: int, prompt: str) -> str:
+    """
+    Generate a colorful local fallback image.
+
+    This is used when Hugging Face image generation is unavailable.
+    """
+
+    filename = f"panel_{panel_number}.png"
+    image_path = OUTPUT_DIR / filename
+
+    width = 1024
+    height = 768
 
     image = Image.new(
         "RGB",
         (width, height),
-        dark,
+        (245, 241, 234),
     )
 
     draw = ImageDraw.Draw(image)
 
-    # -----------------------------------------------------
-    # VERTICAL GRADIENT BACKGROUND
-    # -----------------------------------------------------
-
-    for y in range(height):
-        t = y / height
-        r = int(dark[0] + (mid[0] - dark[0]) * t)
-        g = int(dark[1] + (mid[1] - dark[1]) * t)
-        b = int(dark[2] + (mid[2] - dark[2]) * t)
-        draw.line((0, y, width, y), fill=(r, g, b))
-
-    # -----------------------------------------------------
-    # THIN BORDER / FRAME
-    # -----------------------------------------------------
-
+    # Background
     draw.rectangle(
-        (
-            20,
-            20,
-            width - 20,
-            height - 20,
-        ),
-        outline=accent,
-        width=3,
+        [0, 0, width, height],
+        fill=(245, 241, 234),
     )
 
-    # -----------------------------------------------------
-    # SUBTLE GEOMETRIC ACCENTS (corners)
-    # -----------------------------------------------------
-
-    draw.line((60, 60, 220, 60), fill=accent, width=4)
-    draw.line((60, 60, 60, 220), fill=accent, width=4)
-    draw.line(
-        (width - 60, height - 60, width - 220, height - 60),
-        fill=accent,
-        width=4,
-    )
-    draw.line(
-        (width - 60, height - 60, width - 60, height - 220),
-        fill=accent,
-        width=4,
+    # Header area
+    draw.rectangle(
+        [0, 0, width, 105],
+        fill=(25, 25, 25),
     )
 
-    # -----------------------------------------------------
-    # PANEL LABEL
-    # -----------------------------------------------------
-
-    label_font = _get_font(30, bold=True)
-    body_font = _get_font(22, bold=False)
+    title_font = _get_font(42, bold=True)
+    panel_font = _get_font(30, bold=True)
+    text_font = _get_font(22)
 
     draw.text(
-        (60, 90),
-        f"PANEL {panel_number:02d}",
-        fill=accent,
-        font=label_font,
+        (40, 25),
+        "COMICCRAFT",
+        fill=(255, 255, 255),
+        font=title_font,
     )
 
-    # -----------------------------------------------------
-    # CONTENT CARD (holds the prompt text)
-    # -----------------------------------------------------
+    draw.text(
+        (40, 125),
+        f"PANEL {panel_number}",
+        fill=(30, 30, 30),
+        font=panel_font,
+    )
 
-    card_top = 320
-    card_bottom = height - 90
+    # Comic-style visual area
+    margin = 45
+    top = 185
+    bottom = 650
 
     draw.rounded_rectangle(
-        (
-            60,
-            card_top,
-            width - 60,
-            card_bottom,
-        ),
-        radius=12,
+        [margin, top, width - margin, bottom],
+        radius=30,
         fill=(255, 255, 255),
-        outline=accent,
-        width=2,
+        outline=(60, 60, 60),
+        width=4,
     )
 
-    prompt_text = re.sub(
-        r"\s+",
-        " ",
-        str(prompt),
-    ).strip()
+    # Decorative comic sun
+    draw.ellipse(
+        [720, 225, 850, 355],
+        fill=(255, 200, 70),
+        outline=(80, 60, 20),
+        width=4,
+    )
 
-    # Simple word-wrap so text fits inside the card
-    max_chars_per_line = 60
-    words = prompt_text.split(" ")
-    lines = []
-    current_line = ""
+    # Decorative landscape
+    draw.polygon(
+        [
+            (70, 590),
+            (250, 420),
+            (400, 590),
+        ],
+        fill=(110, 160, 110),
+        outline=(50, 90, 50),
+    )
 
-    for word in words:
-        candidate = f"{current_line} {word}".strip()
-        if len(candidate) > max_chars_per_line:
-            if current_line:
-                lines.append(current_line)
-            current_line = word
-        else:
-            current_line = candidate
+    draw.polygon(
+        [
+            (300, 590),
+            (510, 390),
+            (750, 590),
+        ],
+        fill=(130, 150, 180),
+        outline=(60, 70, 100),
+    )
 
-    if current_line:
-        lines.append(current_line)
+    # Character placeholder
+    character_x = 480
+    character_y = 445
 
-    max_lines = 8
-    if len(lines) > max_lines:
-        lines = lines[:max_lines]
-        lines[-1] = lines[-1].rstrip() + "..."
+    draw.ellipse(
+        [
+            character_x - 50,
+            character_y - 115,
+            character_x + 50,
+            character_y - 15,
+        ],
+        fill=(245, 190, 150),
+        outline=(50, 50, 50),
+        width=4,
+    )
 
-    line_height = 30
-    text_y = card_top + 30
+    draw.rounded_rectangle(
+        [
+            character_x - 70,
+            character_y - 15,
+            character_x + 70,
+            character_y + 145,
+        ],
+        radius=25,
+        fill=(70, 120, 210),
+        outline=(50, 50, 50),
+        width=4,
+    )
 
-    for line in lines:
+    # Prompt description
+    cleaned_prompt = " ".join(prompt.split())
+
+    wrapped_lines = textwrap.wrap(
+        cleaned_prompt,
+        width=75,
+    )
+
+    # Limit display text
+    if len(wrapped_lines) > 8:
+        wrapped_lines = wrapped_lines[:8]
+        if wrapped_lines:
+            wrapped_lines[-1] = wrapped_lines[-1].rstrip(". ") + "..."
+
+    y = 675
+
+    for line in wrapped_lines:
         draw.text(
-            (90, text_y),
+            (45, y),
             line,
-            fill=(30, 30, 40),
-            font=body_font,
+            fill=(55, 55, 55),
+            font=text_font,
         )
-        text_y += line_height
+        y += 24
+
+        if y > height - 25:
+            break
 
     image.save(
-        path,
-        "PNG",
-        optimize=True,
+        image_path,
+        format="PNG",
     )
 
-    return f"/static/panels/{path.name}"
+    return f"/static/panels/{image_path.name}"
 
 
-# ---------------------------------------------------------
-# AI IMAGE GENERATION
-# ---------------------------------------------------------
+# -------------------------------------------------------------------
+# Hugging Face AI image generation
+# -------------------------------------------------------------------
 
 def _generate_ai_image(
     prompt: str,
     panel_number: int,
 ) -> str:
+    """
+    Generate an image using Hugging Face inference.
+    """
 
-    if not settings.hf_token:
+    prompt = _validate_prompt(prompt)
 
+    if not HF_TOKEN:
         raise RuntimeError(
-            "HF_TOKEN is missing."
+            "HF_TOKEN is missing. Add your Hugging Face token "
+            "to the environment variables."
         )
 
-    client = InferenceClient(
-        provider="auto",
-        api_key=settings.hf_token,
+    enhanced_prompt = _build_image_prompt(prompt)
+
+    filename = f"panel_{panel_number}.png"
+    image_path = OUTPUT_DIR / filename
+
+    print(
+        f"Generating AI image for panel {panel_number} "
+        f"using model: {HF_IMAGE_MODEL}"
     )
 
-    # -----------------------------------------------------
-    # IMPORTANT:
-    # The user's Gemini panel prompt becomes the main
-    # description of the image.
-    # -----------------------------------------------------
+    try:
+        client = InferenceClient(
+            provider="auto",
+            api_key=HF_TOKEN,
+        )
 
-    enhanced_prompt = f"""
-Create a high-quality colorful comic-book illustration
-for panel {panel_number} of a continuous comic story.
+        image = client.text_to_image(
+            enhanced_prompt,
+            model=HF_IMAGE_MODEL,
+        )
 
-MAIN SCENE DESCRIPTION:
-{prompt}
+        if image is None:
+            raise RuntimeError(
+                "Hugging Face returned an empty image."
+            )
 
-The image MUST visually represent the scene described above.
+        # Resize if necessary so comic panels remain consistent.
+        if image.mode != "RGB":
+            image = image.convert("RGB")
 
-BACKGROUND REQUIREMENTS:
-- Create a detailed environment based on the location
-  described in the prompt.
-- If the prompt describes a school, create a school
-  environment.
-- If it describes a laboratory, create a laboratory.
-- If it describes a forest, create a detailed forest.
-- If it describes a city, create a detailed city.
-- If it describes space, create a detailed space environment.
-- If it describes a village, create a detailed village.
-- If it describes a room, create the appropriate room.
-- Do not use a generic blank background.
+        image.save(
+            image_path,
+            format="PNG",
+        )
 
-CHARACTER REQUIREMENTS:
-- Include the main character described in the prompt.
-- Show the character performing the action described.
-- Use expressive facial expressions and body language.
-- Keep the character visually clear.
+        print(
+            f"AI image saved successfully: {image_path}"
+        )
 
-ART STYLE:
-- colorful comic-book illustration
-- professional digital illustration
-- vibrant colors
-- clean black line art
-- cinematic lighting
-- detailed background
-- dynamic composition
-- depth and perspective
-- visually rich environment
-- polished artwork
+        # IMPORTANT:
+        # Return the actual saved filename.
+        return f"/static/panels/{image_path.name}"
 
-COMPOSITION:
-- landscape orientation
-- wide cinematic scene
-- characters clearly visible
-- background clearly visible
-- foreground, middle ground and background
-- suitable for a comic panel
+    except Exception as exc:
+        print(
+            f"AI image generation failed for panel "
+            f"{panel_number}: {exc}"
+        )
 
-DO NOT:
-- create a blank background
-- create a white background
-- create a plain studio background
-- add written text
-- add captions
-- add speech bubbles
-- add watermarks
-- add logos
-
-The final result should look like a real colorful
-comic-book panel rather than a presentation slide.
-""".strip()
-
-    image = client.text_to_image(
-        enhanced_prompt,
-        model=settings.hf_image_model,
-    )
-
-    filename = (
-        f"panel_{panel_number}_"
-        f"{_safe_name(prompt)}.png"
-    )
-
-    image_path = PANELS_DIR / filename
-
-    image.save(
-        image_path,
-        "PNG",
-    )
-
-    return f"/static/panels/{filename}"
+        raise
 
 
-# ---------------------------------------------------------
-# MAIN IMAGE FUNCTION
-# ---------------------------------------------------------
+# -------------------------------------------------------------------
+# Public image-generation function
+# -------------------------------------------------------------------
 
 def generate_image(
     prompt: str,
     panel_number: int,
 ) -> str:
+    """
+    Main image-generation function used by routes.py.
 
-    provider = (
-        settings.image_provider
-        .lower()
-        .strip()
+    IMAGE_PROVIDER options:
+
+        hf
+            Use Hugging Face AI image generation.
+
+        placeholder
+            Use local colorful placeholder images.
+
+    If Hugging Face fails, automatically falls back
+    to the local placeholder.
+    """
+
+    prompt = _validate_prompt(prompt)
+
+    print(
+        f"Image generation started for panel "
+        f"{panel_number}"
     )
 
-    # -----------------------------------------------------
-    # REAL AI IMAGE
-    # -----------------------------------------------------
+    if IMAGE_PROVIDER == "placeholder":
+        print(
+            f"Using local placeholder for panel "
+            f"{panel_number}"
+        )
 
-    if provider == "hf":
+        return _placeholder(
+            panel_number,
+            prompt,
+        )
 
+    if IMAGE_PROVIDER == "hf":
         try:
-
             return _generate_ai_image(
                 prompt,
                 panel_number,
             )
 
         except Exception as exc:
-
             print(
-                f"AI image generation failed for "
-                f"panel {panel_number}: {exc}"
-            )
-
-            print(
-                "Using professional local fallback image."
+                f"Falling back to placeholder for panel "
+                f"{panel_number} because AI generation failed: "
+                f"{exc}"
             )
 
             return _placeholder(
-                prompt,
                 panel_number,
+                prompt,
             )
 
-    # -----------------------------------------------------
-    # LOCAL PROFESSIONAL IMAGE
-    # -----------------------------------------------------
+    # Unknown provider
+    print(
+        f"Unknown IMAGE_PROVIDER='{IMAGE_PROVIDER}'. "
+        f"Using placeholder instead."
+    )
 
-    if provider == "placeholder":
-
-        return _placeholder(
-            prompt,
-            panel_number,
-        )
-
-    # -----------------------------------------------------
-    # INVALID PROVIDER
-    # -----------------------------------------------------
-
-    raise RuntimeError(
-        "IMAGE_PROVIDER must be "
-        "'hf' or 'placeholder'."
+    return _placeholder(
+        panel_number,
+        prompt,
     )
