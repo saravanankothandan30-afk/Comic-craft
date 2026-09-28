@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import os
 import re
-import uuid
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
@@ -102,7 +101,7 @@ def _clean_prompt(prompt: str) -> str:
 
 
 # ============================================================
-# BUILD AI PROMPT
+# BUILD THE IMPORTANT AI PROMPT
 # ============================================================
 
 def _build_ai_prompt(
@@ -115,11 +114,9 @@ def _build_ai_prompt(
     return f"""
 COMIC PANEL {panel_number}
 
-IMPORTANT:
-Create this image from the exact scene description below.
-The scene description is the primary source of truth.
-
-Do NOT replace the scene with a generic cartoon scene.
+MOST IMPORTANT INSTRUCTION:
+Create the image primarily from the EXACT SCENE DESCRIPTION below.
+Do not replace the described scene with a generic comic scene.
 
 ============================================================
 EXACT SCENE DESCRIPTION
@@ -128,46 +125,46 @@ EXACT SCENE DESCRIPTION
 {prompt}
 
 ============================================================
-SCENE REQUIREMENTS
+SCENE INTERPRETATION
 ============================================================
 
-Show the exact:
+The scene description above is the source of truth.
 
-1. Characters
-2. Character appearance
-3. Character actions
-4. Character expressions
-5. Location
-6. Environment
-7. Important objects
-8. Main event
-9. Mood
-10. Relationship between characters and objects
+You must visually identify and represent:
 
-If a specific location is mentioned, make that location visually obvious.
+1. WHO is present
+2. WHAT each character is doing
+3. WHERE the scene takes place
+4. IMPORTANT objects mentioned
+5. The character's expression and body language
+6. The important action or event
+7. The atmosphere and mood
+8. The relationship between characters and objects
 
-If a specific action is mentioned, show that action clearly.
+If the scene describes a specific location, show that location clearly.
 
-If an important object is mentioned, make that object visible.
+If the scene describes a specific action, show that action clearly.
 
-Do NOT invent an unrelated scene.
+If the scene describes an important object, make that object visible and relevant.
+
+Do not substitute unrelated characters, locations, objects, or actions.
 
 ============================================================
-CHARACTER CONTINUITY
+CONTINUITY
 ============================================================
 
 This is panel {panel_number} of a five-panel comic.
 
-Keep the main character visually consistent across panels:
+Maintain visual continuity with the story.
 
+The main character should remain visually consistent:
 - same approximate age
 - same hairstyle
 - same clothing
 - same general appearance
-- same character identity
 
-Only change pose, expression, position, or action when required
-by the scene description.
+Only change the character's pose, expression, or action when required by
+the scene description.
 
 ============================================================
 ART STYLE
@@ -175,8 +172,7 @@ ART STYLE
 
 Create a polished colorful comic-book illustration.
 
-Use:
-
+Style:
 - professional digital comic artwork
 - vibrant colors
 - clean black line art
@@ -194,17 +190,16 @@ COMPOSITION
 
 Landscape comic-panel composition.
 
-Include:
-
+Show:
 - foreground
 - main characters
 - important objects
 - detailed environment
 - background depth
 
-The main action must be immediately understandable.
+The main action must be easy to understand immediately.
 
-Do not make the main character extremely small.
+Do not make the character tiny.
 
 Do not use a generic studio background.
 
@@ -215,7 +210,6 @@ TEXT RESTRICTIONS
 ============================================================
 
 Do NOT generate:
-
 - speech bubbles
 - captions
 - subtitles
@@ -226,7 +220,7 @@ Do NOT generate:
 - watermarks
 - UI elements
 
-ComicCraft adds the story text separately.
+The story text will be added separately by ComicCraft.
 
 ============================================================
 FINAL PRIORITY
@@ -234,14 +228,8 @@ FINAL PRIORITY
 
 SCENE ACCURACY is more important than decorative elements.
 
-Create a unique image that clearly represents the exact
-scene described above.
-
-Do not reuse a generic scene.
-
-Do not create the same image for different panel descriptions.
-
-The image must visually match the supplied scene.
+The final image must look like a real comic panel showing
+the exact event described in the scene description.
 """.strip()
 
 
@@ -323,7 +311,7 @@ def _generate_ai_image(
         ) from exc
 
     # --------------------------------------------------------
-    # Validate image
+    # Validate
     # --------------------------------------------------------
 
     if image is None:
@@ -342,17 +330,10 @@ def _generate_ai_image(
         ) from exc
 
     # --------------------------------------------------------
-    # UNIQUE FILENAME
-    #
-    # This prevents browser/Render cache from showing
-    # an older image for a new generation.
+    # Fixed filename
     # --------------------------------------------------------
 
-    unique_id = uuid.uuid4().hex[:8]
-
-    filename = (
-        f"panel_{panel_number}_{unique_id}.png"
-    )
+    filename = f"panel_{panel_number}.png"
 
     image_path = PANELS_DIR / filename
 
@@ -383,7 +364,7 @@ def _generate_ai_image(
 
 
 # ============================================================
-# LOCAL PLACEHOLDER
+# LOCAL FALLBACK
 # ============================================================
 
 def _placeholder(
@@ -653,7 +634,7 @@ def _placeholder(
         ),
         radius=15,
         fill=(255, 255, 255),
-        outline=(20, 20, 20),
+        outline=(20, 20, 30),
         width=4,
     )
 
@@ -664,12 +645,7 @@ def _placeholder(
         font=body_font,
     )
 
-    # Unique placeholder filename too
-    unique_id = uuid.uuid4().hex[:8]
-
-    filename = (
-        f"panel_{panel_number}_{unique_id}.png"
-    )
+    filename = f"panel_{panel_number}.png"
 
     path = PANELS_DIR / filename
 
@@ -712,6 +688,10 @@ def generate_image(
     # --------------------------------------------------------
 
     if provider == "hf":
+
+        # IMPORTANT:
+        # Do NOT silently replace a failed AI image.
+        # We want the real error in Render logs.
 
         return _generate_ai_image(
             prompt,
